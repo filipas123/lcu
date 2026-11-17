@@ -660,17 +660,24 @@ test('in the Claude app with no surface attached the question card still asks', 
   expect(calls.filter(call => call.tool === 'choice').map(call => call.args.choice)).toEqual(['session'])
 })
 
-// T3 Code runs Claude Code through the Agent SDK (CLAUDE_CODE_ENTRYPOINT=t3-code) and may attach no surface:
-// it asks with the question card too, and its own card would answer "Allow once".
-test('in T3 Code with no surface attached the question card still asks', async ($, on) => {
-  const clock = mock.clock(on)
-  const opened: string[] = []
-  const calls = lcu(on, { ...DESKTOP, surfaces: [], placed: false, opened })
-  on('env.get', (_$: any, e: any) => ({ value: e.name === 'CLAUDE_CODE_ENTRYPOINT' ? 't3-code' : undefined }))
-  const questions = asker(on, clock, 'Allow this conversation')
-  const pending = $.classic.Elicitation(ELICITATION as any)
-  await until(clock, () => calls.some(call => call.tool === 'choice'))
-  expect(((await pending) as any).block).toBeDefined()
-  expect(questions.length).toBe(1)
-  expect(calls.filter(call => call.tool === 'choice').map(call => call.args.choice)).toEqual(['session'])
-})
+// T3 Code (CLAUDE_CODE_ENTRYPOINT=t3-code) shows the engine's form as its own approval card, which only the
+// person can answer. The mod must not claim LCU's request there, whatever the session reports: a claimed
+// request waits for the mod's choice and ignores the host's answer. Before, the first row asked with the
+// question card and the second claimed the request and opened a pane.
+for (const [name, options] of [
+  ['a desktop surface', DESKTOP],
+  ['a terminal that places panes', {}],
+] as const) {
+  test(`in T3 Code with ${name} the request is left to T3 Code's approval card`, async ($, on) => {
+    const clock = mock.clock(on)
+    const opened: string[] = []
+    const calls = lcu(on, { ...options, opened } as any)
+    on('env.get', (_$: any, e: any) => ({ value: e.name === 'CLAUDE_CODE_ENTRYPOINT' ? 't3-code' : undefined }))
+    const questions = asker(on, clock, 'Allow this conversation')
+    const result: any = await $.classic.Elicitation(ELICITATION as any)
+    expect(result.block).toBeUndefined()
+    expect(calls).toEqual([])
+    expect(questions).toEqual([])
+    expect(opened).toEqual([])
+  })
+}
