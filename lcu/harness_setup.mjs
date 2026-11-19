@@ -1,11 +1,12 @@
 // Local harness packages for Oh My Pi, Hermes and DeepSeek Harness, whose host configuration remains with their native
-// installers, and the Junie registration, which has no installer.
+// installers, and the Junie and Antigravity registrations, which write their JSON config files directly.
 import { createHash } from 'node:crypto';
 import { accessSync, constants, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
 
+import { MODEL_TOOLS } from './approval.mjs';
 import { real, shellQuote } from './fsutil.mjs';
 import { applyChanges, change, checked, json, member, parseJson, readFile, regularPath, seams, spacedJson } from './setup.mjs';
 
@@ -264,4 +265,66 @@ export function configureJunie(home, command, node, release, { scope }) {
   }
   applyChanges(changes);
   return { mcpPath, configPath };
+}
+
+
+// Antigravity --------------------------------------------------------------------------------------------
+
+export const ANTIGRAVITY_SERVER = 'lcu';
+export const ANTIGRAVITY_HOOK_NAME = 'lcu';
+/** The Antigravity hook events the relay's `--hook` mode handles, with Antigravity's timeout for each, in seconds. */
+export const ANTIGRAVITY_HOOKS = { SessionStart: 10, PreInvocation: 30, Stop: 60 };
+// Antigravity's default per-tool-call MCP timeout is 180 s; the relay bounds its own calls.
+const ANTIGRAVITY_MCP_TIMEOUT_SECONDS = 3_600;
+const ANTIGRAVITY_HOOK = /(^|[\\/])adapters[\\/]antigravity\.mjs'? --hook$/;
+
+/** Whether an Antigravity hook handler is one LCU wrote, from any release. */
+export const isAntigravityHook = (hook) => isObject(hook) && (hook.type === undefined || hook.type === 'command') &&
+  typeof hook.command === 'string' && ANTIGRAVITY_HOOK.test(hook.command);
+
+/**
+ * Register the Antigravity relay as the `lcu` server of `mcp_config.json` and its lifecycle hooks under the `lcu`
+ * key of `hooks.json` (user scope: `~/.gemini/config/`; project scope: `<project>/.agents/`), replacing only LCU's
+ * own entries. Both files are shared by Antigravity CLI, App and IDE.
+ */
+export function configureAntigravity(home, command, node, release, { scope = 'user', project = null } = {}) {
+  if (process.platform === 'win32') throw new Error('Antigravity is not supported on Windows yet.');
+  if (scope === 'project' && !project) throw new Error('Antigravity project scope requires a project directory.');
+  const adapter = join(release, 'adapters/antigravity.mjs');
+  if (!existsSync(adapter)) throw new Error(`LCU Antigravity relay missing: ${adapter}`);
+  const root = scope === 'project' ? join(project, '.agents') : join(home, '.gemini/config');
+  const mcpPath = join(root, 'mcp_config.json');
+  const hooksPath = join(root, 'hooks.json');
+
+  const mcpBefore = readFile(mcpPath);
+  const mcp = parseJson(mcpBefore);
+  if (!isObject(mcp)) throw new Error(`Antigravity MCP configuration must be an object: ${mcpPath}`);
+  const servers = member(mcp, 'mcpServers', {}, `Antigravity mcpServers must be an object: ${mcpPath}`);
+  servers[ANTIGRAVITY_SERVER] = {
+    command: String(node),
+    args: [adapter, ...command],
+    timeoutSeconds: ANTIGRAVITY_MCP_TIMEOUT_SECONDS,
+    tools: Object.fromEntries(MODEL_TOOLS.map((tool) => [tool, { eager: true }])),
+  };
+
+  const hooksBefore = readFile(hooksPath);
+  const hooks = parseJson(hooksBefore);
+  if (!isObject(hooks)) throw new Error(`Antigravity hooks configuration must be an object: ${hooksPath}`);
+  const entry = member(hooks, ANTIGRAVITY_HOOK_NAME, {}, `Antigravity ${ANTIGRAVITY_HOOK_NAME} hook entry must be an object: ${hooksPath}`);
+  const hookCommand = `${shellQuote(String(node))} ${shellQuote(adapter)} --hook`;
+  for (const [event, timeout] of Object.entries(ANTIGRAVITY_HOOKS)) {
+    const handlers = member(entry, event, [], `Antigravity ${event} hooks must be an array of objects: ${hooksPath}`);
+    if (!handlers.every(isObject)) {
+      throw new Error(`Antigravity ${event} hooks must be an array of objects: ${hooksPath}`);
+    }
+    const kept = handlers.filter((handler) => !isAntigravityHook(handler));
+    kept.push({ type: 'command', command: hookCommand, timeout });
+    entry[event] = kept;
+  }
+
+  const changes = [];
+  if (mcpBefore === null || !isDeepStrictEqual(parseJson(mcpBefore), mcp)) changes.push(change(mcpPath, mcpBefore, json(mcp)));
+  if (hooksBefore === null || !isDeepStrictEqual(parseJson(hooksBefore), hooks)) changes.push(change(hooksPath, hooksBefore, json(hooks)));
+  applyChanges(changes);
+  return { mcpPath, hooksPath };
 }

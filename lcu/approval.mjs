@@ -27,6 +27,8 @@ const LEGACY_CLAUDE_RULE = 'mcp__lcu';
 // rule (`lcu:js` would also match `lcu:js_reset` and any later `js…` tool); a `pattern` without wildcards matches
 // exactly one tool.
 export const JUNIE_PATTERNS = MODEL_TOOLS.map((tool) => `lcu:${tool}`);
+// Antigravity CLI: exact `permissions.allow` rules in ~/.gemini/antigravity-cli/settings.json.
+export const ANTIGRAVITY_RULES = MODEL_TOOLS.map((tool) => `mcp(lcu/${tool})`);
 // Codex: per-tool `approval_mode` under `[mcp_servers.lcu.tools.<tool>]`. Earlier versions wrote the
 // server-wide `default_tools_approval_mode = "approve"`.
 const CODEX_KEY = 'default_tools_approval_mode';
@@ -222,6 +224,60 @@ function applyClaude(mode, home, project) {
 
 export const junieAllowlistPath = (home) => join(home, '.junie/allowlist.json');
 
+export const antigravitySettingsPath = (home) => join(home, '.gemini/antigravity-cli/settings.json');
+
+function applyAntigravity(mode, home, scope) {
+  if (scope === 'project') {
+    return 'Antigravity CLI permissions live in ~/.gemini/antigravity-cli/settings.json (user-scoped); nothing to configure at project scope';
+  }
+  const path = antigravitySettingsPath(home);
+  const key = `antigravity|${path}`;
+  const record = loadRecord(home);
+  const before = readFile(path);
+  if (before === null && mode !== 'auto') {
+    commit(home, key, null);
+    return 'unchanged (no settings file)';
+  }
+  const settings = parseJson(before);
+  if (!isObject(settings)) throw new Error(`Antigravity settings must be an object: ${path}`);
+  const permissions = member(settings, 'permissions', {}, `Antigravity permissions must be an object: ${path}`);
+  const allow = Object.hasOwn(permissions, 'allow') ? permissions.allow : [];
+  if (!Array.isArray(allow) || allow.some((rule) => typeof rule !== 'string')) {
+    throw new Error(`Antigravity allow rules must be a string array: ${path}`);
+  }
+  const added = new Set(key in record ? (record[key].added ?? []).filter((rule) => allow.includes(rule)) : []);
+  let rules = [...allow];
+  let note = '';
+  let outcome;
+  let removed = [];
+  if (mode === 'auto') {
+    for (const rule of ANTIGRAVITY_RULES) {
+      if (!rules.includes(rule)) {
+        rules.push(rule);
+        added.add(rule);
+      }
+    }
+    outcome = rules.some((rule) => !allow.includes(rule)) ? 'added' : 'unchanged';
+  } else {
+    removed = allow.filter((rule) => added.has(rule));
+    rules = allow.filter((rule) => !added.has(rule));
+    outcome = removed.length ? 'removed' : 'unchanged';
+    const kept = rules.filter((rule) => ANTIGRAVITY_RULES.includes(rule));
+    if (kept.length) note = `; kept your own ${kept.map((rule) => `\`${rule}\``).join(', ')}, which LCU did not add`;
+  }
+  if (rules.length !== allow.length || rules.some((rule, index) => rule !== allow[index])) {
+    if (rules.length) permissions.allow = rules;
+    else {
+      delete permissions.allow;
+      if (!Object.keys(permissions).length) delete settings.permissions;
+    }
+    applyChanges([change(path, before, mode !== 'auto' && !Object.keys(settings).length ? null : json(settings))]);
+  }
+  commit(home, key, mode === 'auto' && added.size ? { added: [...added].sort() } : null);
+  const shown = (mode !== 'auto' && removed.length ? removed : ANTIGRAVITY_RULES).map((rule) => `\`${rule}\``).join(', ');
+  return `${outcome} ${shown} in permissions.allow (${path})${note}`;
+}
+
 function applyJunie(mode, home) {
   const path = junieAllowlistPath(home);
   const key = `junie|${path}`;
@@ -326,6 +382,7 @@ export function apply(mode, name, home, { scope, project, env, plan = null }) {
   if (name === 'claude-code') return applyClaude(mode, home, scope === 'project' ? project : null);
   if (name === 'omp') return applyOmp(mode, home, env);
   if (name === 'junie') return applyJunie(mode, home);
+  if (name === 'antigravity') return applyAntigravity(mode, home, scope);
   if (name === 'codex') {
     plan ??= codexPlan(mode, home, { scope, project, env });
     if (plan.record !== KEEP) commit(home, plan.key, plan.record);

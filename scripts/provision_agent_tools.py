@@ -95,7 +95,7 @@ def provision(release, source, *, target='linux', mac_node=None, adapters_source
                 adapters.mkdir()
                 for filename in ('package.json', 'package-lock.json', 'client.mjs', 'claude.mjs',
                                  'audio-files.mjs', 'codex.mjs', 'diagnostics.mjs', 'host-guard.mjs',
-                                 'cross-turn.mjs', 'junie.mjs'):
+                                 'cross-turn.mjs', 'hook-relay.mjs', 'junie.mjs', 'antigravity.mjs'):
                     shutil.copy2(adapters_source / filename, adapters / filename)
                 shutil.copytree(adapters_source / 'claude-mod', adapters / 'claude-mod',
                                 ignore=shutil.ignore_patterns('node_modules', 'tests', '.DS_Store'))

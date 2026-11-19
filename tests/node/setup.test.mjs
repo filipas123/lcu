@@ -628,6 +628,26 @@ test('Windows setup configures only the signed-in account, in a direct session, 
   assert.throws(() => check('--export', join(home, 'x')), /portable export is not implemented/);
 });
 
+test('Windows setup leaves out Junie and Antigravity: all and auto skip them, and naming one fails validation', (t) => {
+  const home = temporary(t);
+  mkdirSync(join(home, '.gemini/antigravity'), { recursive: true });
+  mkdirSync(join(home, '.junie'), { recursive: true });
+  override(t, setup.seams, 'which', () => null);
+  override(t, setup.seams, 'account', () => ({ name: 'Alice', uid: null, gid: null, home }));
+  const check = (...argv) => setup.validate(setup.parse(['--prefix', '/Users/alice/AppData/Local/LCU', ...argv]));
+  override(t, process, 'platform', 'win32');
+  const all = check('--agent', 'all').names;
+  assert.ok(all.includes('codex'));
+  assert.ok(!all.includes('antigravity') && !all.includes('junie'));
+  assert.deepEqual(setup.detect(home).filter((name) => ['junie', 'antigravity'].includes(name)), []);
+  assert.throws(() => check('--agent', 'antigravity'), /^Error: Antigravity cannot be set up on Windows yet\.$/);
+  assert.throws(() => check('--agent', 'agy'), /Antigravity cannot be set up on Windows yet/);
+  assert.throws(() => check('--agent', 'codex', '--agent', 'junie'), /Junie cannot be set up on Windows yet/);
+  override(t, process, 'platform', 'darwin');
+  assert.deepEqual(setup.detect(home).filter((name) => ['junie', 'antigravity'].includes(name)), ['junie', 'antigravity']);
+  assert.deepEqual(setup.supportedClients(), Object.keys(setup.CLIENTS));
+});
+
 test('Windows registrations name the stable lcu.cmd; setup itself starts the launcher on the current Node', (t) => {
   override(t, process, 'platform', 'win32');
   const prefix = '/Users/alice/AppData/Local/LCU';
@@ -829,6 +849,45 @@ test('Junie setup warns that approvals last until revoked and asks to continue u
   // Other harnesses get no Junie warning.
   run = await f.main('--agent', 'codex');
   assert.ok(!run.err.includes('Junie'));
+});
+
+test('Antigravity setup supports agy alias, project scope, warning confirmation and --yes', async (t) => {
+  const answers = { crossTurn: 'n', apply: 'y', agy: 'n' };
+  const agyFixture = () => {
+    const f = interactiveFixture(t, answers);
+    override(t, setup.seams, 'ask', (q) => {
+      f.prompts.push(q);
+      return q === setup.ANTIGRAVITY_CONTINUE_QUESTION ? answers.agy : q === CROSS_TURN_QUESTION ? answers.crossTurn : answers.apply;
+    });
+    return f;
+  };
+  // Declined: Antigravity is skipped, the other harness is still registered.
+  let f = agyFixture();
+  let run = await f.raw('--agent', 'agy', '--agent', 'codex', '--no-chrome', '--cross-turn', 'off');
+  assert.equal(run.code, 0, run.err);
+  assert.ok(run.err.includes(setup.ANTIGRAVITY_APPROVAL_WARNING));
+  assert.deepEqual(f.prompts, [setup.ANTIGRAVITY_CONTINUE_QUESTION, 'Apply this setup? [y/N] ']);
+  assert.match(run.out, /Antigravity skipped/);
+  assert.deepEqual(f.registered.map((entry) => entry.names), [['codex']]);
+  // Declined alone: setup cancels without changing anything.
+  f = agyFixture();
+  run = await f.raw('--agent', 'antigravity', '--no-chrome', '--cross-turn', 'off');
+  assert.deepEqual(f.prompts, [setup.ANTIGRAVITY_CONTINUE_QUESTION]);
+  assert.match(run.out, /Cancelled; no agent configuration changed/);
+  assert.deepEqual(f.registered, []);
+  // Accepted with project scope: registered cleanly.
+  answers.agy = 'y';
+  f = agyFixture();
+  run = await f.raw('--agent', 'agy', '--scope', 'project', '--project', f.home, '--no-chrome', '--cross-turn', 'off');
+  assert.equal(run.code, 0, run.err);
+  assert.deepEqual(f.registered.map((entry) => [entry.names, entry.scope]), [[['antigravity'], 'project']]);
+  // --yes prints warning without prompting.
+  f = agyFixture();
+  run = await f.raw('--agent', 'antigravity', '--no-chrome', '--cross-turn', 'off', '--yes');
+  assert.equal(run.code, 0, run.err);
+  assert.ok(run.err.includes(setup.ANTIGRAVITY_APPROVAL_WARNING));
+  assert.deepEqual(f.prompts, []);
+  assert.deepEqual(f.registered.map((entry) => entry.names), [['antigravity']]);
 });
 
 test('the cross-turn question names per-app approvals only where they exist', () => {

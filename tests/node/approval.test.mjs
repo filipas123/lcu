@@ -403,3 +403,34 @@ test('Claude: an empty settings file or a byte order mark reads as before', (t) 
   c.apply('auto');
   assert.equal(c.read(c.user).model, 'x');
 });
+
+test('Antigravity: auto adds exact mcp(lcu/js) and mcp(lcu/js_reset) rules, keeps user rules; ask removes only what it added', (t) => {
+  const home = temporary(t);
+  const path = approval.antigravitySettingsPath(home);
+  const agy = (mode, scope = 'user') => approval.apply(mode, 'antigravity', home, { scope, project: scope === 'project' ? join(home, 'p') : null, env: {} });
+  assert.equal(agy('ask'), 'unchanged (no settings file)');
+  assert.equal(existsSync(path), false);
+  // Project scope does not mutate user-scoped settings.json.
+  assert.match(agy('auto', 'project'), /user-scoped/);
+  assert.equal(existsSync(path), false);
+  // Creating from scratch and reversing removes the empty file.
+  assert.match(agy('auto'), /added `mcp\(lcu\/js\)`, `mcp\(lcu\/js_reset\)`/);
+  assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')), { permissions: { allow: ['mcp(lcu/js)', 'mcp(lcu/js_reset)'] } });
+  assert.match(agy('ask'), /removed `mcp\(lcu\/js\)`, `mcp\(lcu\/js_reset\)`/);
+  assert.equal(existsSync(path), false);
+  // Existing settings and user-written rules are preserved.
+  const original = { model: 'Gemini 4', permissions: { allow: ['read_url(github.com)', 'mcp(lcu/js)'], deny: ['command(rm -rf)'] } };
+  write(path, setup.json(original));
+  assert.match(agy('auto'), /added `mcp\(lcu\/js\)`, `mcp\(lcu\/js_reset\)`/);
+  assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')).permissions.allow, ['read_url(github.com)', 'mcp(lcu/js)', 'mcp(lcu/js_reset)']);
+  assert.match(agy('auto'), /^unchanged/);
+  assert.match(agy('ask'), /removed `mcp\(lcu\/js_reset\)`.*kept your own `mcp\(lcu\/js\)`/);
+  assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')), original);
+  assert.deepEqual(approval.loadRecord(home), {});
+  // Malformed settings are refused without editing.
+  for (const content of ['[]', '{"permissions": []}', '{"permissions": {"allow": "x"}}', '{"permissions": {"allow": [1]}}']) {
+    write(path, content);
+    assert.throws(() => agy('auto'), Error, content);
+    assert.equal(readFileSync(path, 'utf8'), content);
+  }
+});

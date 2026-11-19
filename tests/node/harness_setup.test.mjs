@@ -1,7 +1,7 @@
 // Registration boundaries for the Oh My Pi, Hermes and DeepSeek Harness native harness packages and the Junie files.
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, symlinkSync } from 'node:fs';
-import { DSH_PACKAGE, dshDesktopListed, isJunieHook, JUNIE_HOOKS } from '../../lcu/harness_setup.mjs';
+import { ANTIGRAVITY_HOOK_NAME, ANTIGRAVITY_HOOKS, DSH_PACKAGE, dshDesktopListed, isAntigravityHook, isJunieHook, JUNIE_HOOKS } from '../../lcu/harness_setup.mjs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -21,6 +21,7 @@ function fixture(t, releaseName = 'release') {
   for (const name of ['plugin.yaml', '__init__.py', 'bridge.mjs']) write(join(release, 'adapters/hermes', name), `fixture ${name}`);
   write(join(release, 'adapters/dsh/plugin.mjs'), 'export function apply() {}');
   write(join(release, 'adapters/junie.mjs'), '// relay');
+  write(join(release, 'adapters/antigravity.mjs'), '// relay');
   const tools = join(root, 'tools');
   write(join(tools, 'node/bin/node'), '#!/bin/sh\n', 0o755);
   write(join(tools, 'node_modules/skills/bin/cli.mjs'));
@@ -58,6 +59,17 @@ test('detect finds a harness by its executable, and DeepSeek Harness also by its
   override(t, setup.seams, 'dshApps', () => [app]);
   assert.deepEqual(setup.detect(home), ['omp', 'dsh']);
   assert.equal(setup.harnessInstalled('dsh', home, '/bin'), true);
+});
+
+test('detect finds Antigravity from any of its config or app directories even when agy is off PATH', (t) => {
+  override(t, setup.seams, 'which', () => null);
+  override(t, setup.seams, 'dshApps', () => []);
+  assert.deepEqual(setup.detect(temporary(t)), []);
+  for (const dir of ['.gemini/antigravity', '.gemini/antigravity-cli', '.gemini/antigravity-ide', '.gemini/config']) {
+    const home = temporary(t);
+    mkdirSync(join(home, dir), { recursive: true });
+    assert.deepEqual(setup.detect(home), ['antigravity'], dir);
+  }
 });
 
 test('OMP links a per-profile package that imports the adapter relatively, with the command and no skill', async (t) => {
@@ -298,4 +310,74 @@ test('the Junie hook table agrees with the relay', () => {
   assert.deepEqual(JSON.parse(table), JUNIE_HOOKS);
   const events = /HOOK_EVENTS = \{([^}]*)\}/.exec(relay)[1].match(/(\w+):/g).map((key) => key.slice(0, -1));
   assert.deepEqual(events, Object.keys(JUNIE_HOOKS));
+});
+
+test('Antigravity registers the relay in mcp_config.json and hooks in hooks.json at user and project scope', async (t) => {
+  const f = fixture(t);
+  const mcpPath = join(f.home, '.gemini/config/mcp_config.json');
+  const hooksPath = join(f.home, '.gemini/config/hooks.json');
+  // An empty (0-byte) mcp_config.json, as Antigravity leaves before any server is added, parses cleanly.
+  write(mcpPath, '');
+  const other = { command: 'cmux-hook' };
+  const mine = { type: 'command', command: './my-stop.sh', timeout: 5 };
+  write(hooksPath, JSON.stringify({ cmux: { Stop: [other] }, [ANTIGRAVITY_HOOK_NAME]: { Stop: [mine] } }));
+  assert.deepEqual(await f.configure('antigravity'), []);
+  assert.deepEqual(f.calls, []);
+  const node = join(f.tools, 'node/bin/node');
+  const adapter = join(f.release, 'adapters/antigravity.mjs');
+  assert.deepEqual(readJson(mcpPath).mcpServers, {
+    lcu: {
+      command: node,
+      args: [adapter, ...f.command],
+      timeoutSeconds: 3_600,
+      tools: { js: { eager: true }, js_reset: { eager: true } },
+    },
+  });
+  const hooks = readJson(hooksPath);
+  assert.deepEqual(hooks.cmux, { Stop: [other] });
+  const expected = (timeout) => ({ type: 'command', command: `${node} ${adapter} --hook`, timeout });
+  assert.deepEqual(hooks[ANTIGRAVITY_HOOK_NAME].Stop, [mine, expected(60)]);
+  assert.deepEqual(hooks[ANTIGRAVITY_HOOK_NAME].SessionStart, [expected(10)]);
+  assert.deepEqual(hooks[ANTIGRAVITY_HOOK_NAME].PreInvocation, [expected(30)]);
+  assert.match(f.seen.out, /Antigravity: MCP server registered in .*mcp_config\.json; turn hooks in .*hooks\.json\./);
+  // A second run changes nothing.
+  const bytes = [readFileSync(mcpPath, 'utf8'), readFileSync(hooksPath, 'utf8')];
+  assert.deepEqual(await f.configure('antigravity'), []);
+  assert.deepEqual([readFileSync(mcpPath, 'utf8'), readFileSync(hooksPath, 'utf8')], bytes);
+  // Project scope writes under <project>/.agents/ and preserves user files.
+  assert.deepEqual(await f.configure('antigravity', { scope: 'project' }), []);
+  const projectMcp = join(f.project, '.agents/mcp_config.json');
+  const projectHooks = join(f.project, '.agents/hooks.json');
+  assert.deepEqual(readJson(projectMcp).mcpServers.lcu.args, [adapter, ...f.command]);
+  assert.deepEqual(readJson(projectHooks)[ANTIGRAVITY_HOOK_NAME].Stop, [expected(60)]);
+  assert.deepEqual([readFileSync(mcpPath, 'utf8'), readFileSync(hooksPath, 'utf8')], bytes);
+});
+
+test('Antigravity setup replaces earlier release hooks and refuses malformed files without editing', async (t) => {
+  const f = fixture(t, 'release with space');
+  const hooksPath = join(f.home, '.gemini/config/hooks.json');
+  const old = { type: 'command', command: "/old/node '/opt/lcu/0.13.9 x/adapters/antigravity.mjs' --hook", timeout: 30 };
+  assert.ok(isAntigravityHook(old));
+  assert.ok(isAntigravityHook({ command: '/x/adapters/antigravity.mjs --hook' }));
+  assert.ok(!isAntigravityHook({ type: 'command', command: '/x/adapters/antigravity.mjs --hook --other' }));
+  write(hooksPath, JSON.stringify({ lcu: { Stop: [old, { type: 'command', command: 'mine' }] } }));
+  assert.deepEqual(await f.configure('antigravity'), []);
+  const stop = readJson(hooksPath).lcu.Stop;
+  assert.equal(stop.length, 2);
+  assert.deepEqual(stop[0], { type: 'command', command: 'mine' });
+  assert.match(stop[1].command, /'[^']*release with space\/adapters\/antigravity\.mjs' --hook$/);
+  for (const content of ['[]', '{"lcu": []}', '{"lcu": {"Stop": {}}}', '{"lcu": {"Stop": ["x"]}}']) {
+    write(hooksPath, content);
+    const [[, , message]] = await f.configure('antigravity');
+    assert.match(message, /Antigravity/);
+    assert.equal(readFileSync(hooksPath, 'utf8'), content);
+  }
+});
+
+test('the Antigravity hook table agrees with the relay', () => {
+  const relay = readFileSync(join(REPO, 'adapters/antigravity.mjs'), 'utf8');
+  const table = /HOOK_TIMEOUTS = (\{[^}]*\})/.exec(relay)[1].replace(/(\w+):/g, '"$1":');
+  assert.deepEqual(JSON.parse(table), ANTIGRAVITY_HOOKS);
+  const events = /HOOK_EVENTS = \{([^}]*)\}/.exec(relay)[1].match(/(\w+):/g).map((key) => key.slice(0, -1));
+  assert.deepEqual(events, Object.keys(ANTIGRAVITY_HOOKS));
 });

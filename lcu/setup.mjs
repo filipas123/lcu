@@ -15,7 +15,7 @@ import { install as installApprovalMod } from './claude_mod.mjs';
 import { install as hideHostOnlyTools } from './claude_visibility.mjs';
 import { accountHome, isFile, lstat, real, shellQuote } from './fsutil.mjs';
 import { approvalNote, question as crossTurnQuestion, readCrossTurn, setCrossTurn } from './cross_turn.mjs';
-import { configureDsh, configureHermes, configureJunie, configureOmp, DSH_DEFAULT_PROFILE, dshExecutable, validDshProfile } from './harness_setup.mjs';
+import { configureAntigravity, configureDsh, configureHermes, configureJunie, configureOmp, DSH_DEFAULT_PROFILE, dshExecutable, validDshProfile } from './harness_setup.mjs';
 import { withLock } from './lock.mjs';
 import { ask, say, warn } from './terminal.mjs';
 
@@ -32,7 +32,8 @@ export function appPrerequisiteMessage(location, { alternateLocation = false } =
   return message;
 }
 
-// LCU names mapped to upstream installers; configuration formats belong upstream.
+// LCU names mapped to upstream installers; configuration formats belong upstream. `platforms` lists the only
+// platforms (`process.platform`) a client can be set up on; a client without it is set up on every platform.
 export const CLIENTS = {
   codex: { label: 'Codex', executable: 'codex', detectPath: '.codex', mcpAgent: 'codex' },
   'claude-code': { label: 'Claude Code', executable: 'claude', detectPath: '.claude.json', mcpAgent: 'claude-code' },
@@ -40,11 +41,20 @@ export const CLIENTS = {
   omp: { label: 'Oh My Pi', executable: 'omp', detectPath: '.omp', mcpAgent: '' },
   hermes: { label: 'Hermes', executable: 'hermes', detectPath: '.hermes', mcpAgent: '' },
   dsh: { label: 'DeepSeek Harness', executable: 'dsh', detectPath: '.dsh', mcpAgent: '' },
-  junie: { label: 'Junie', executable: 'junie', detectPath: '.junie', mcpAgent: '' },
+  // Junie's and Antigravity's relays meet their hooks on a Unix socket.
+  junie: { label: 'Junie', executable: 'junie', detectPath: '.junie', mcpAgent: '', platforms: ['darwin', 'linux'] },
+  antigravity: { label: 'Antigravity', executable: 'agy',
+    detectPath: ['.gemini/antigravity', '.gemini/antigravity-cli', '.gemini/antigravity-ide', '.gemini/config'], mcpAgent: '',
+    platforms: ['darwin', 'linux'] },
 };
-export const ALIASES = { claude: 'claude-code', 'oh-my-pi': 'omp', 'hermes-agent': 'hermes', 'deepseek-harness': 'dsh' };
+const PLATFORM_NAMES = { darwin: 'macOS', linux: 'Linux', win32: 'Windows' };
+/** Whether client `name` can be set up on this platform. */
+const supportedHere = (name) => !CLIENTS[name].platforms || CLIENTS[name].platforms.includes(process.platform);
+/** The clients that can be set up on this platform: what `all` and `auto` choose from. */
+export const supportedClients = () => Object.keys(CLIENTS).filter(supportedHere);
+export const ALIASES = { claude: 'claude-code', 'oh-my-pi': 'omp', 'hermes-agent': 'hermes', 'deepseek-harness': 'dsh', agy: 'antigravity' };
 // Harnesses whose native registration needs their own executable; Codex and Claude Code register through
-// add-mcp and their config files, and Junie through its config files, without the CLI installed.
+// add-mcp and their config files, and Junie and Antigravity through their config files, without the CLI installed.
 const NEEDS_BINARY = ['pi', 'omp', 'hermes', 'dsh'];
 // Native harness plugins are profile-scoped, and Junie reads hooks only from the user's config; project scope is
 // unsupported.
@@ -560,6 +570,17 @@ export async function configure(names, home, command, toolsRoot, releaseRoot,
       applyApproval(name);
       continue;
     }
+    if (name === 'antigravity') {
+      try {
+        const { mcpPath, hooksPath } = configureAntigravity(home, command, node, releaseRoot, { scope, project });
+        say(`${client.label}: MCP server registered in ${mcpPath}; turn hooks in ${hooksPath}.`);
+      } catch (error) {
+        fail(name, 'MCP', error);
+        continue;
+      }
+      applyApproval(name);
+      continue;
+    }
     let mcpCommand = command;
     let mcpSetupError = null;
     let codexPlan = null;
@@ -878,10 +899,15 @@ export function validate(args) {
   if (unknown.length) {
     throw new Error(`Unknown agent: ${unknown.join(', ')}. Run lcu setup --list-agents, or use --export for a custom client.`);
   }
+  const unsupported = names.filter((name) => CLIENTS[name] && !supportedHere(name));
+  if (unsupported.length) {
+    throw new Error(`${unsupported.map((name) => CLIENTS[name].label).join(', ')} cannot be set up on ` +
+      `${PLATFORM_NAMES[process.platform] ?? process.platform} yet.`);
+  }
   if ((names.includes('auto') || names.includes('all')) && names.length > 1) {
     throw new Error('Use --agent all or --agent auto alone, or select explicit agent IDs.');
   }
-  if (names.length === 1 && names[0] === 'all') names = Object.keys(CLIENTS);
+  if (names.length === 1 && names[0] === 'all') names = supportedClients();
   if (!(names.length === 1 && names[0] === 'auto')) validateAgentScope(names, args.scope);
   if (args['dsh-profile'] !== undefined) {
     if (args.export) throw new Error('--dsh-profile configures DeepSeek Harness; it cannot be combined with --export.');
@@ -899,20 +925,22 @@ function validateAgentScope(names, scope) {
 }
 
 export const detect = (home) => Object.entries(CLIENTS)
+  .filter(([name]) => supportedHere(name))
   .filter(([name, client]) => (name === 'dsh' ? dshExecutable(home) : seams.which(client.executable)) ||
-    existsSync(join(home, client.detectPath))).map(([name]) => name);
+    (Array.isArray(client.detectPath) ? client.detectPath : [client.detectPath]).some((path) => existsSync(join(home, path))))
+  .map(([name]) => name);
 
 async function chooseAgents(home) {
   const detected = detect(home);
   say('Select one or more agents for this account (comma-separated IDs).');
-  for (const [name, client] of Object.entries(CLIENTS)) say(`  ${name.padEnd(16)} ${client.label}${detected.includes(name) ? ' [detected]' : ''}`);
+  for (const name of supportedClients()) say(`  ${name.padEnd(16)} ${CLIENTS[name].label}${detected.includes(name) ? ' [detected]' : ''}`);
   say('Use all for every supported client, including those not installed yet.',
     'For other clients, cancel and use --export /absolute/new/plugin-directory.');
   let names = [...new Set((await seams.ask('Agents: ')).trim().split(',').map((name) => name.trim()).filter(Boolean)
     .map((name) => ALIASES[name] ?? name))];
-  if (names.length === 1 && names[0] === 'all') return Object.keys(CLIENTS);
+  if (names.length === 1 && names[0] === 'all') return supportedClients();
   if (names.length === 1 && names[0] === 'auto') names = detected;
-  if (!names.length || names.some((name) => !CLIENTS[name])) throw new Error('Choose supported agent IDs, or use --export for a custom client.');
+  if (!names.length || names.some((name) => !CLIENTS[name] || !supportedHere(name))) throw new Error('Choose supported agent IDs, or use --export for a custom client.');
   return names;
 }
 
@@ -1051,7 +1079,7 @@ export async function main(argv, { configure: register = configure, crossTurn = 
     return 0;
   }
   if (args['list-agents']) {
-    for (const [name, client] of Object.entries(CLIENTS)) say(`${name.padEnd(16)} ${client.label} (${agentScopes(name)})`);
+    for (const name of supportedClients()) say(`${name.padEnd(16)} ${CLIENTS[name].label} (${agentScopes(name)})`);
     say('Custom clients: --export /absolute/new/plugin-directory');
     return 0;
   }
@@ -1123,6 +1151,11 @@ export const JUNIE_APPROVAL_WARNING = 'Warning: Junie can\'t show LCU\'s per-app
   'itself when it needs an app; each approval (Touch ID or password) allows that app until you revoke it with ' +
   '`lcu apps revoke <App>`. List allowed apps with `lcu apps`.';
 export const JUNIE_CONTINUE_QUESTION = 'Continue? [y/N] ';
+/** Printed by setup for Antigravity, never to a model: Antigravity CLI cancels LCU's per-app approval prompt. */
+export const ANTIGRAVITY_APPROVAL_WARNING = 'Warning: Antigravity CLI cancels LCU\'s per-app approval prompt. When Antigravity does not show an ' +
+  'approval prompt, it will run `lcu apps allow <App>` itself; each approval (Touch ID or password) allows that ' +
+  'app until you revoke it with `lcu apps revoke <App>`. List allowed apps with `lcu apps`.';
+export const ANTIGRAVITY_CONTINUE_QUESTION = 'Continue? [y/N] ';
 
 async function registerLocked(args, account, home, names, missing, register, paths) {
   const { releaseRoot, desktopCommand, directRuntime, toolsRoot, setupCommand, setupEnvironment, crossTurn } = paths;
@@ -1187,7 +1220,8 @@ async function registerLocked(args, account, home, names, missing, register, pat
     const entries = { 'claude-code': 'Claude Code: allow `mcp__lcu__js` and `mcp__lcu__js_reset`',
       codex: 'Codex: `approval_mode = "approve"` for the `js` and `js_reset` tools of `[mcp_servers.lcu]`',
       omp: 'Oh My Pi: `tools.approval` `js` and `js_reset` set to `allow`',
-      junie: 'Junie: allowlist `mcpTools` rules for exactly `lcu:js` and `lcu:js_reset`' };
+      junie: 'Junie: allowlist `mcpTools` rules for exactly `lcu:js` and `lcu:js_reset`',
+      antigravity: 'Antigravity CLI: `permissions.allow` rules for exactly `mcp(lcu/js)` and `mcp(lcu/js_reset)`' };
     const chosen = names.filter((name) => entries[name]).map((name) => entries[name]);
     say('Approval mode auto: add only LCU\'s own entries so its tools run without a per-call harness prompt' +
       (chosen.length ? `: ${chosen.join('; ')}` : '') + '. ' +
@@ -1219,6 +1253,19 @@ async function registerLocked(args, account, home, names, missing, register, pat
       !['y', 'yes'].includes((await seams.ask(JUNIE_CONTINUE_QUESTION)).trim().toLowerCase())) {
       names = names.filter((name) => name !== 'junie');
       say('Junie skipped; it will not be registered.');
+      if (!names.length) {
+        say('Cancelled; no agent configuration changed.');
+        return 'cancelled';
+      }
+    }
+  }
+  if (names.includes('antigravity') && !args.export) {
+    // Shown to the person only: when Antigravity cancels elicitation, the model is told to run `lcu apps allow`.
+    warn(ANTIGRAVITY_APPROVAL_WARNING);
+    if (!args.yes && seams.interactive() &&
+      !['y', 'yes'].includes((await seams.ask(ANTIGRAVITY_CONTINUE_QUESTION)).trim().toLowerCase())) {
+      names = names.filter((name) => name !== 'antigravity');
+      say('Antigravity skipped; it will not be registered.');
       if (!names.length) {
         say('Cancelled; no agent configuration changed.');
         return 'cancelled';

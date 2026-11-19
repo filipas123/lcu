@@ -10,7 +10,8 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { ElicitRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import {
-  callWithDeadline, createApprovalGate, createCuaClient, createWorkerTurns, nativeAppApprovalOptions,
+  callWithDeadline, createApprovalGate, createCuaClient, createWorkerTurns, mergedToolDescriptor,
+  nativeAppApprovalOptions,
   nativeAppApprovalResponse, relayElicitation, sendControlRequest, TURN_CLEANUP_TIMEOUT_CODE,
 } from '../client.mjs';
 
@@ -412,4 +413,40 @@ test('worker turns report whether a turn end can reach the original hook, and st
   assert.equal(turns.upstreamId('s', 't'), 't', 'the oldest turn is evicted past the limit');
   turns.ended('s', 'v');
   assert.equal(turns.skyHook('s', 'v'), 'none');
+});
+
+test('mergedToolDescriptor flattens top-level oneOf and anyOf schemas and leaves plain schemas unchanged', () => {
+  const plain = { name: 'js_reset', description: 'Reset', inputSchema: { type: 'object', properties: {}, additionalProperties: false } };
+  assert.equal(mergedToolDescriptor(plain), plain);
+
+  const oneOfJs = {
+    name: 'js',
+    description: 'Run JS',
+    inputSchema: {
+      type: 'object',
+      properties: { code: { type: 'string' }, completion_summary: { type: 'string' } },
+      additionalProperties: false,
+      oneOf: [
+        { type: 'object', properties: { code: { type: 'string' }, timeout_ms: { type: 'integer' } }, required: ['code'], additionalProperties: false },
+        { type: 'object', properties: { completion_summary: { type: 'string' } }, required: ['completion_summary'], additionalProperties: false },
+      ],
+    },
+  };
+  const flattened = mergedToolDescriptor(oneOfJs);
+  assert.equal('oneOf' in flattened.inputSchema, false);
+  assert.equal('required' in flattened.inputSchema, false);
+  assert.equal(flattened.inputSchema.additionalProperties, false);
+  assert.deepEqual(Object.keys(flattened.inputSchema.properties).sort(), ['code', 'completion_summary', 'timeout_ms']);
+
+  const sharedRequired = {
+    name: 'x',
+    inputSchema: {
+      type: 'object',
+      anyOf: [
+        { type: 'object', properties: { a: { type: 'string' }, b: { type: 'string' } }, required: ['a', 'b'] },
+        { type: 'object', properties: { a: { type: 'string' }, c: { type: 'string' } }, required: ['a'] },
+      ],
+    },
+  };
+  assert.deepEqual(mergedToolDescriptor(sharedRequired).inputSchema.required, ['a']);
 });
