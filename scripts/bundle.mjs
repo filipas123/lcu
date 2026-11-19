@@ -5,7 +5,7 @@ import { lstatSync, readdirSync, readFileSync, readlinkSync, realpathSync } from
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { within } from '../lcu/fsutil.mjs';
 
-export const VERSION = '0.13.9';
+export const VERSION = '0.14.0';
 
 const PLATFORMS = { linux: 'linux', darwin: 'darwin', windows: 'win32' };
 
