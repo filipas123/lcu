@@ -763,3 +763,48 @@ test('Pi shows the cached update notice to the person at session start, never to
     rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test('Pi registers non-strict tools, one flat object for a js schema with closed top-level oneOf forms, and forwards calls unchanged', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'lcu-pi-one-of-'));
+  const log = join(directory, 'mcp.jsonl');
+  const oldCommand = process.env.LCU_MCP_COMMAND;
+  const oldLog = process.env.LCU_FIXTURE_LOG;
+  const oldOneOf = process.env.LCU_FIXTURE_JS_ONE_OF;
+  process.env.LCU_MCP_COMMAND = JSON.stringify([process.execPath, fixture]);
+  process.env.LCU_FIXTURE_LOG = log;
+  process.env.LCU_FIXTURE_JS_ONE_OF = '1';
+  const handlers = new Map();
+  const tools = new Map();
+  const pi = { on(event, handler) { handlers.set(event, handler); },
+    registerTool(tool) { tools.set(tool.name, tool); }, registerCommand() {} };
+  const ctx = { sessionManager: { getSessionId: () => 'pi-one-of-session' }, model: { id: 'pi-model' }, hasUI: false };
+  try {
+    piExtension(pi);
+    await handlers.get('before_agent_start')({ systemPrompt: 'Pi base prompt' }, ctx);
+    const schema = tools.get('js').parameters;
+    assert.equal(schema.type, 'object');
+    assert.equal('oneOf' in schema, false);
+    assert.equal('required' in schema, false);
+    assert.deepEqual(Object.keys(schema.properties).sort(), ['code', 'completion_summary', 'timeout_ms', 'title']);
+    assert.deepEqual(tools.get('js_reset').parameters,
+      { type: 'object', properties: {}, additionalProperties: false });
+    assert.equal(tools.get('js').strict, false);
+    assert.equal(tools.get('js_reset').strict, false);
+    await handlers.get('agent_start')({}, ctx);
+    const code = await tools.get('js').execute('1', { code: 'one-of-code' }, undefined, undefined, ctx);
+    assert.equal(code.content[0].text, 'one-of-code');
+    const summary = await tools.get('js').execute('2', { completion_summary: 'all done' }, undefined, undefined, ctx);
+    assert.equal(summary.content[0].text, 'summary: all done');
+    const calls = readFileSync(log, 'utf8').trim().split('\n').map(JSON.parse).filter(entry => entry.name === 'js');
+    assert.deepEqual(calls.map(entry => entry.args), [{ code: 'one-of-code' }, { completion_summary: 'all done' }]);
+  } finally {
+    await handlers.get('session_shutdown')?.();
+    if (oldCommand === undefined) delete process.env.LCU_MCP_COMMAND;
+    else process.env.LCU_MCP_COMMAND = oldCommand;
+    if (oldLog === undefined) delete process.env.LCU_FIXTURE_LOG;
+    else process.env.LCU_FIXTURE_LOG = oldLog;
+    if (oldOneOf === undefined) delete process.env.LCU_FIXTURE_JS_ONE_OF;
+    else process.env.LCU_FIXTURE_JS_ONE_OF = oldOneOf;
+    rmSync(directory, { recursive: true, force: true });
+  }
+});

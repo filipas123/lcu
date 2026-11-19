@@ -7,7 +7,9 @@ import { fileURLToPath } from 'node:url';
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import type { TSchema } from 'typebox';
 import { getDefaultEnvironment } from '@modelcontextprotocol/sdk/client/stdio.js';
-import { createCuaClient, MODEL_TOOLS, nativeAppApprovalOptions, nativeAppApprovalResponse } from '../client.mjs';
+import {
+  createCuaClient, MODEL_TOOLS, mergedToolDescriptor, nativeAppApprovalOptions, nativeAppApprovalResponse,
+} from '../client.mjs';
 import { persistAudioContent } from '../audio-files.mjs';
 import { openDiagnosticLog } from '../diagnostics.mjs';
 import { cacheDirectory, checkOnce, readRecord, writeRecord } from '../../lcu/check_record.mjs';
@@ -645,11 +647,18 @@ export default function (pi: ExtensionAPI, options: {
     // Pi refreshes tools registered during before_agent_start before its model call.
     for (const descriptor of descriptors) {
       const name = descriptor.name;
+      // A top-level `oneOf` becomes one object; see `mergedToolDescriptor` for why.
+      const { inputSchema } = mergedToolDescriptor(descriptor);
       pi.registerTool({
         name,
         label: `LCU ${name}`,
         description: descriptor.description,
-        parameters: descriptor.inputSchema as TSchema,
+        parameters: inputSchema as TSchema,
+        // OpenAI's Responses API treats a function tool as strict unless it says otherwise, and strict mode
+        // requires every property. The model would then fill optional fields it did not mean to set (a `js`
+        // timeout, or `code` beside `completion_summary`, which the original server refuses). Explicit
+        // `strict: false` keeps those fields optional; OMP carries it to the wire, and plain Pi ignores it.
+        strict: false,
         ...(options.ompEssentialTools ? { loadMode: 'essential' } : {}),
         async execute(id, args, signal, _onUpdate, ctx) {
           const current = await connected();

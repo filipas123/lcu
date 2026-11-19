@@ -13,6 +13,44 @@ import { declineAgentHostApp } from './host-guard.mjs';
 
 export const MODEL_TOOLS = new Set(['js', 'js_reset']);
 
+const TOP_LEVEL_COMBINATORS = ['oneOf', 'anyOf'];
+
+/** The top-level combinators of an original tool's schema that `mergedToolDescriptor` merges. */
+export function mergedCombinators(schema) {
+  return TOP_LEVEL_COMBINATORS.filter(key => Array.isArray(schema?.[key]));
+}
+
+/**
+ * The descriptor to list for an original public tool whose input schema has a top-level `oneOf` or `anyOf`.
+ * The original `js` lists its two argument forms (`code`, or `completion_summary` alone) as closed branches
+ * under a top-level `oneOf`. Hosts that rewrite a tool schema before sending it (Claude Code leaves such a tool
+ * out; Oh My Pi's intent field and OpenAI's strict conversion make every closed branch unsatisfiable) cannot
+ * use that shape. Such a schema becomes one object with the properties of every form, requiring only what every
+ * form requires. Calls still reach the original server unchanged, and it checks them against its own schema.
+ * Any other descriptor is returned as it is.
+ */
+export function mergedToolDescriptor(tool) {
+  const schema = tool.inputSchema;
+  const combinators = mergedCombinators(schema);
+  if (combinators.length === 0) return tool;
+  const inputSchema = { ...schema, type: 'object', properties: { ...schema.properties } };
+  const required = new Set(Array.isArray(schema.required) ? schema.required : []);
+  for (const key of combinators) {
+    delete inputSchema[key];
+    const forms = schema[key].filter(form => form && typeof form === 'object');
+    for (const form of forms) {
+      for (const [name, property] of Object.entries(form.properties ?? {})) inputSchema.properties[name] ??= property;
+    }
+    const formRequired = forms.map(form => (Array.isArray(form.required) ? form.required : []));
+    for (const name of formRequired[0] ?? []) {
+      if (formRequired.every(names => names.includes(name))) required.add(name);
+    }
+  }
+  if (required.size > 0) inputSchema.required = [...required];
+  else delete inputSchema.required;
+  return { ...tool, inputSchema };
+}
+
 /** Default cleanup/tool timeout; `js` extends past a longer requested run. */
 export const TURN_END_TIMEOUT_MS = 120_000;
 

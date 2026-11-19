@@ -48,10 +48,17 @@ if (controlPath) {
     control.listen(controlPath, resolve);
   });
 }
+// The shape of the original `js` schema in newer ChatGPT builds: two closed argument forms under a top-level oneOf.
+const CODE_FORM = { code: { type: 'string' }, timeout_ms: { type: 'integer' }, title: { type: 'string', maxLength: 80 } };
+const SUMMARY_FORM = { completion_summary: { type: 'string', maxLength: 80 } };
+const jsInputSchema = process.env.LCU_FIXTURE_JS_ONE_OF ? {
+  type: 'object', additionalProperties: false, properties: { ...CODE_FORM, ...SUMMARY_FORM }, oneOf: [
+    { type: 'object', properties: CODE_FORM, required: ['code'], additionalProperties: false },
+    { type: 'object', properties: SUMMARY_FORM, required: ['completion_summary'], additionalProperties: false },
+  ],
+} : { type: 'object', properties: { code: { type: 'string' } }, required: ['code'], additionalProperties: false };
 server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [
-  { name: 'js', description: 'Original JS description.', inputSchema: {
-    type: 'object', properties: { code: { type: 'string' } }, required: ['code'], additionalProperties: false,
-  } },
+  { name: 'js', description: 'Original JS description.', inputSchema: jsInputSchema },
   { name: 'js_reset', description: 'Original reset description.', inputSchema: {
     type: 'object', properties: {}, additionalProperties: false,
   } },
@@ -61,6 +68,9 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [
 server.setRequestHandler(CallToolRequestSchema, async request => {
   const { name, arguments: args, _meta } = request.params;
   record({ name, args, meta: _meta });
+  if (name === 'js' && typeof args?.completion_summary === 'string') {
+    return { content: [{ type: 'text', text: `summary: ${args.completion_summary}` }] };
+  }
   if (name === 'js' && /^sleep-\d+$/.test(args?.code ?? '')) {
     await new Promise(resolve => setTimeout(resolve, Number(args.code.slice(6))));
     return { content: [{ type: 'text', text: args.code }] };
